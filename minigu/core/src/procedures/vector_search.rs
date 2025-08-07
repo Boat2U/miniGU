@@ -75,7 +75,7 @@ pub fn build_procedure() -> Procedure {
         let query_f32: Vec<f32> = query_vector.iter().map(|f| f.into_inner()).collect();
         // Perform vector search
         let search_results = memory_graph
-            .vector_search(property_id, &query_f32, k as usize, l_value)
+            .vector_search(property_id, &query_f32, k as usize, l_value, None)
             .map_err(|e| anyhow::anyhow!("Vector search failed: {}", e))?;
 
         // Convert results to DataChunk

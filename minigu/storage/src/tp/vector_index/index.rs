@@ -1,3 +1,5 @@
+use bitvec::prelude::*;
+
 use crate::error::StorageResult;
 
 /// Vector index trait for approximate nearest neighbor search
@@ -8,7 +10,25 @@ pub trait VectorIndex: Send + Sync {
 
     /// Search for k nearest neighbors using diskann-rs l_value parameter
     /// l_value corresponds to the search list size
-    fn search(&self, query: &[f32], k: usize, l_value: u32) -> StorageResult<Vec<u64>>;
+    fn ann_search(
+        &self,
+        query: &[f32],
+        k: usize,
+        l_value: u32,
+        filter_bitmap: Option<&BitVec>,
+    ) -> StorageResult<Vec<u64>>;
+
+    /// Search for k nearest neighbors with bitmap filtering
+    /// filter_bitmap: None for no filtering, Some(bitmap) where bit i indicates if node i satisfies
+    /// filter
+    /// The search strategy dynamically adapts to the bitmap's selectivity
+    fn search(
+        &self,
+        query: &[f32],
+        k: usize,
+        l_value: u32,
+        filter_bitmap: Option<&BitVec>,
+    ) -> StorageResult<Vec<u64>>;
 
     /// Insert vectors with their node IDs (for dynamic updates)
     fn insert(&mut self, vectors: &[(u64, Vec<f32>)]) -> StorageResult<()>;

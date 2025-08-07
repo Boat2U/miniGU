@@ -1,5 +1,6 @@
 use std::sync::{Arc, RwLock, Weak};
 
+use bitvec::prelude::*;
 use crossbeam_skiplist::SkipSet;
 use dashmap::DashMap;
 use diskann::model::IndexConfiguration;
@@ -11,7 +12,11 @@ use vector::Metric;
 
 use super::checkpoint::{CheckpointManager, CheckpointManagerConfig};
 use super::transaction::{MemTransaction, MemTxnManager, TransactionHandle, UndoEntry, UndoPtr};
-use super::vector_index::{InMemDiskANNAdapter, VectorIndex};
+use super::vector_index::{
+    // Core vector index
+    InMemDiskANNAdapter,
+    VectorIndex,
+};
 use crate::common::model::edge::{Edge, Neighbor};
 use crate::common::model::vertex::Vertex;
 use crate::common::transaction::{DeltaOp, IsolationLevel, SetPropsOp, Timestamp};
@@ -1063,20 +1068,21 @@ impl MemoryGraph {
         self.vector_indices.get(&property_id)
     }
 
-    /// Perform vector similarity search
+    /// Perform vector similarity search (returns node IDs)
     ///
     /// # Arguments
     /// * `property_id` - The PropertyId of the vector property to search
     /// * `query` - Query vector for similarity search
     /// * `k` - Number of nearest neighbors to return
     /// * `l_value` - Search list size parameter
-    /// * `_filter` - Optional filter (to be implemented)
+    /// * `filter` - Optional filter bitmap for restricting search results
     pub fn vector_search(
         &self,
         property_id: PropertyId,
         query: &[f32],
         k: usize,
         l_value: u32,
+        filter: Option<&BitVec>,
     ) -> StorageResult<Vec<u64>> {
         // Get the vector index for the specified property
         let index_ref = self.get_vector_index(property_id).ok_or_else(|| {
@@ -1085,11 +1091,17 @@ impl MemoryGraph {
             ))
         })?;
 
-        // Perform the search
-        let results = index_ref.search(query, k, l_value)?; // node_ids
+        // Directly delegate to the vector index's search method (returns node IDs)
+        let results = index_ref.search(query, k, l_value, filter)?;
 
         Ok(results)
     }
+
+    // ===== Bitmap Generation for Filtering =====
+
+    // === New FilterBitmap System ===
+
+    // TODO: Add new FilterBitmap v2 methods here when catalog dependency is resolved
 
     /// Get mutable vector index for the specified property
     fn get_mutable_vector_index(
@@ -1295,7 +1307,7 @@ pub mod tests {
     }
 
     /// Creates small-scale boundary test vectors with connectivity for u32::MAX testing
-    fn create_large_scale_boundary_vectors() -> Vec<(VertexId, String, Vec<f32>)> {
+    fn create_small_scale_boundary_vectors() -> Vec<(VertexId, String, Vec<f32>)> {
         let mut vectors = create_small_scale_test_vectors();
 
         // Add boundary ID vertex with large coordinates near existing clusters
@@ -2181,7 +2193,7 @@ pub mod tests {
         cluster1_query[0] = 35.0f32;
         cluster1_query[1] = 30.0f32;
         cluster1_query[2] = 25.0f32;
-        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &cluster1_query, 10, 50)?;
+        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &cluster1_query, 10, 50, None)?;
         assert!(!results.is_empty(), "Should find vectors in cluster 1");
         assert!(results.len() <= 10, "Results should not exceed k");
 
@@ -2190,7 +2202,7 @@ pub mod tests {
         cluster2_query[0] = 55.0f32;
         cluster2_query[1] = 45.0f32;
         cluster2_query[2] = 37.0f32;
-        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &cluster2_query, 5, 30)?;
+        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &cluster2_query, 5, 30, None)?;
         assert!(!results.is_empty(), "Should find vectors in cluster 2");
         assert!(results.len() <= 5, "Results should not exceed k");
 
@@ -2205,7 +2217,7 @@ pub mod tests {
 
         // Try to search without building index
         let query = vec![1.0f32; TEST_DIMENSION];
-        let result = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 1, 20);
+        let result = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 1, 20, None);
 
         // Should fail with IndexNotFound error
         assert!(result.is_err());
@@ -2247,7 +2259,7 @@ pub mod tests {
 
         // Try to search with wrong dimension query
         let wrong_dim_query = vec![0.0f32; 50]; // Wrong dimension
-        let result = graph.vector_search(EMBEDDING_PROPERTY_ID, &wrong_dim_query, 1, 50);
+        let result = graph.vector_search(EMBEDDING_PROPERTY_ID, &wrong_dim_query, 1, 50, None);
 
         // Should fail due to dimension mismatch
         assert!(result.is_err());
@@ -2280,7 +2292,7 @@ pub mod tests {
 
         // Search should return correct vertex IDs for modified vectors
         for (expected_id, _, embedding) in test_vectors.iter().take(5) {
-            let results = graph.vector_search(EMBEDDING_PROPERTY_ID, embedding, 1, 50)?;
+            let results = graph.vector_search(EMBEDDING_PROPERTY_ID, embedding, 1, 50, None)?;
             assert_eq!(results.len(), 1);
             assert_eq!(
                 results[0], *expected_id,
@@ -2299,7 +2311,7 @@ pub mod tests {
         let txn = graph.begin_transaction(IsolationLevel::Serializable);
 
         // Create small-scale test vectors with one boundary ID vertex
-        let test_vectors = create_large_scale_boundary_vectors();
+        let test_vectors = create_small_scale_boundary_vectors();
         for (id, name, embedding) in &test_vectors {
             let vertex = create_vertex_with_vector(*id, name, embedding.clone());
             graph.create_vertex(&txn, vertex)?;
@@ -2319,7 +2331,7 @@ pub mod tests {
         query[0] = 98.0f32; // Query near the boundary vertex coordinates
         query[1] = 83.0f32;
         query[2] = 66.0f32;
-        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 5, 50)?;
+        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 5, 50, None)?;
 
         assert!(!results.is_empty(), "Should find nearby vectors");
         assert!(
@@ -2357,7 +2369,7 @@ pub mod tests {
         query[0] = 75.0f32; // Search in middle area
         query[1] = 60.0f32;
         query[2] = 45.0f32;
-        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 15, 50)?;
+        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 15, 50, None)?;
         assert!(!results.is_empty());
         assert!(results.len() <= 15);
 
@@ -2388,7 +2400,7 @@ pub mod tests {
             query[0] = 65.0f32; // Search in cluster area
             query[1] = 55.0f32;
             query[2] = 40.0f32;
-            let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 5, 30)?;
+            let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 5, 30, None)?;
             assert!(!results.is_empty());
             txn2.commit()?;
         }
@@ -2432,8 +2444,8 @@ pub mod tests {
         query[0] = 80.0f32; // Query in large coordinate space
         query[1] = 70.0f32;
         query[2] = 50.0f32;
-        let results_1 = graph.vector_search(1, &query, 3, 30)?;
-        let results_2 = graph.vector_search(2, &query, 3, 30)?;
+        let results_1 = graph.vector_search(1, &query, 3, 30, None)?;
+        let results_2 = graph.vector_search(2, &query, 3, 30, None)?;
 
         assert!(!results_1.is_empty());
         assert!(!results_2.is_empty());
@@ -2479,7 +2491,7 @@ pub mod tests {
         target_vector: &[f32],
         expected_node_id: VertexId,
     ) -> StorageResult<bool> {
-        let results = graph.vector_search(property_id, target_vector, 5, 50)?;
+        let results = graph.vector_search(property_id, target_vector, 5, 50, None)?;
         Ok(results.contains(&expected_node_id))
     }
 
@@ -2490,7 +2502,7 @@ pub mod tests {
         query_vector: &[f32],
         excluded_node_id: VertexId,
     ) -> StorageResult<bool> {
-        let results = graph.vector_search(property_id, query_vector, 20, 100)?; // Use larger k to be thorough
+        let results = graph.vector_search(property_id, query_vector, 20, 100, None)?; // Use larger k to be thorough
         Ok(!results.contains(&excluded_node_id))
     }
 
@@ -2950,7 +2962,8 @@ pub mod tests {
             .insert_into_vector_index(EMBEDDING_PROPERTY_ID, &[(*new_id, new_embedding.clone())])?;
 
         // 2. Search for inserted vector
-        let search_results = graph.vector_search(EMBEDDING_PROPERTY_ID, new_embedding, 5, 50)?;
+        let search_results =
+            graph.vector_search(EMBEDDING_PROPERTY_ID, new_embedding, 5, 50, None)?;
         assert!(search_results.contains(new_id));
 
         // 3. Delete the inserted vector
