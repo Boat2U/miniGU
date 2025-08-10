@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use dashmap::DashMap;
+use diskann::common::AlignedBoxWithSlice;
 use diskann::index::{ANNInmemIndex, create_inmem_index};
 use diskann::model::IndexConfiguration;
 use diskann::model::vertex::{DIM_104, DIM_128, DIM_256};
@@ -13,6 +14,21 @@ use vector::distance_l2_vector_f32;
 use super::filter::FilterMask;
 use super::index::VectorIndex;
 use crate::error::{StorageError, StorageResult, VectorIndexError};
+
+/// Aligned query buffer that maintains 64-byte alignment guarantee
+enum AlignedQueryBuffer<'a> {
+    Borrowed(&'a [f32]),
+    Owned(AlignedBoxWithSlice<f32>),
+}
+
+impl AlignedQueryBuffer<'_> {
+    fn as_slice(&self) -> &[f32] {
+        match self {
+            Self::Borrowed(slice) => slice,
+            Self::Owned(aligned) => aligned.as_slice(),
+        }
+    }
+}
 
 /// Index statistics and performance metrics
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -113,26 +129,17 @@ impl InMemDiskANNAdapter {
         ) = IndexStats::new();
     }
 
-    /// Create aligned query vector if necessary for optimal SIMD performance
-    fn ensure_query_aligned(query: &[f32]) -> Vec<f32> {
-        if query.as_ptr().align_offset(32) == 0 {
-            // Already aligned, return as-is
-            query.to_vec()
+    /// Create aligned query vector for optimal SIMD performance
+    /// Uses DiskANN-rs AlignedBoxWithSlice for memory-safe 64-byte alignment
+    /// Returns AlignedQueryBuffer to maintain alignment guarantee
+    fn ensure_query_aligned(query: &[f32]) -> StorageResult<AlignedQueryBuffer<'_>> {
+        if query.as_ptr().align_offset(64) == 0 {
+            Ok(AlignedQueryBuffer::Borrowed(query))
         } else {
-            // Create a properly aligned vector
-            // Using Box allocation which has better alignment guarantees
-            let mut aligned: Vec<f32> = Vec::with_capacity(query.len() + 8);
-
-            // Find the aligned position
-            let ptr = aligned.as_mut_ptr();
-            let offset = ptr.align_offset(32) / std::mem::size_of::<f32>();
-
-            // Resize and copy data to aligned position
-            aligned.resize(query.len() + offset, 0.0);
-            aligned[offset..offset + query.len()].copy_from_slice(query);
-
-            // Return the aligned portion
-            aligned[offset..offset + query.len()].to_vec()
+            let mut aligned = AlignedBoxWithSlice::<f32>::new(query.len(), 64)
+                .map_err(|e| StorageError::VectorIndex(VectorIndexError::DiskANN(e)))?;
+            aligned.as_mut_slice().copy_from_slice(query);
+            Ok(AlignedQueryBuffer::Owned(aligned))
         }
     }
 
@@ -149,12 +156,11 @@ impl InMemDiskANNAdapter {
         }
 
         // Ensure query vector is 64-byte aligned for SIMD requirements
-        let aligned_query = Self::ensure_query_aligned(query);
+        let aligned_query = Self::ensure_query_aligned(query)?;
 
         let mut heap = BinaryHeap::<(OrderedFloat<f32>, u32)>::with_capacity(k);
         let mut valid_candidates = 0;
 
-        // Direct iteration over candidate vectors
         for vector_id in filter_mask.iter_candidates() {
             // TODO: Filter out deleted vectors
 
@@ -163,7 +169,7 @@ impl InMemDiskANNAdapter {
                 .inner
                 .get_aligned_vector_data(vector_id)
                 .map_err(|e| StorageError::VectorIndex(VectorIndexError::DiskANN(e)))?;
-            let distance = Self::compute_l2_distance(&aligned_query, stored_vector)?;
+            let distance = Self::compute_l2_distance(aligned_query.as_slice(), stored_vector)?;
             valid_candidates += 1;
 
             if heap.len() < k {
@@ -258,16 +264,16 @@ impl InMemDiskANNAdapter {
         // Helper macro to safely compute SIMD distance for supported dimensions
         macro_rules! simd_distance {
             ($const_dim:expr) => {{
-                // Verify exact dimension match for safety
-                if dimension != $const_dim {
-                    return Ok(Self::compute_scalar_l2_squared(query, stored));
+                // Check 64-byte alignment (Vector crate requirement)
+                if query.as_ptr().align_offset(64) != 0 {
+                    panic!("query must be 64-byte aligned");
+                    // return Ok(Self::compute_scalar_l2_squared(query, stored));
                 }
-                // Check 32-byte alignment (Vector crate requirement)
-                if query.as_ptr().align_offset(32) != 0 || stored.as_ptr().align_offset(32) != 0 {
-                    return Ok(Self::compute_scalar_l2_squared(query, stored));
+                if stored.as_ptr().align_offset(64) != 0 {
+                    panic!("vectors must be 64-byte aligned");
                 }
 
-                // Safety: We've verified dimension match and 32-byte alignment
+                // Safety: We've verified dimension match and 64-byte alignment
                 unsafe {
                     let query_array = &*(query.as_ptr() as *const [f32; $const_dim]);
                     let stored_array = &*(stored.as_ptr() as *const [f32; $const_dim]);
@@ -280,25 +286,11 @@ impl InMemDiskANNAdapter {
             DIM_104 => simd_distance!(DIM_104),
             DIM_128 => simd_distance!(DIM_128),
             DIM_256 => simd_distance!(DIM_256),
-            _ => Self::compute_scalar_l2_squared(query, stored),
+            // _ => Self::compute_scalar_l2_squared(query, stored),
+            _ => unreachable!(),
         };
 
         Ok(distance)
-    }
-
-    /// Compute L2 squared distance using scalar operations
-    /// Returns squared distance (without sqrt) to match SIMD version behavior
-    #[inline]
-    fn compute_scalar_l2_squared(query: &[f32], stored: &[f32]) -> f32 {
-        query
-            .iter()
-            .zip(stored.iter())
-            .map(|(a, b)| {
-                let diff = *a - *b;
-                diff * diff
-            })
-            .sum()
-        // Note: No sqrt() to maintain consistency with SIMD version
     }
 }
 

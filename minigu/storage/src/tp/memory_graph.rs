@@ -1120,27 +1120,6 @@ impl MemoryGraph {
             .collect()
     }
 
-    /// Convert a boolean bitmap to a list of node IDs
-    ///
-    /// # Arguments
-    /// * `bitmap` - Boolean array where true indicates the node should be included
-    ///
-    /// # Returns
-    /// Vector of node IDs corresponding to true positions in the bitmap
-    fn bitmap_to_node_ids(bitmap: &BooleanArray) -> Vec<u64> {
-        bitmap
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, value)| {
-                if value.unwrap_or(false) {
-                    Some(idx as u64)
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
     /// Get mutable vector index for the specified property
     fn get_mutable_vector_index(
         &self,
@@ -1306,8 +1285,8 @@ pub mod tests {
     fn create_small_scale_test_vectors() -> Vec<(VertexId, String, Vec<f32>)> {
         let count = 200;
         let points_per_cluster = 25; // 25 points per cluster, 8 clusters
-        // Generate test vertices with unique, non-contiguous IDs (start at 5)
-        // to mimic a real subset from mixed graph + vector search.
+        // Not all graph nodes have vectors; so vids to vector search are non-contiguous (sparse
+        // subset)
         let start_id: VertexId = 5;
         let stride: VertexId = 3;
 
@@ -3026,6 +3005,227 @@ pub mod tests {
             original_embedding,
             original_id
         )?);
+
+        txn.commit()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_adaptive_filter_brute_force_search() -> StorageResult<()> {
+        let (graph, _cleaner) = mock_empty_graph();
+        let txn = graph.begin_transaction(IsolationLevel::Serializable);
+
+        // Use existing create_small_scale_test_vectors (200 vectors with non-consecutive IDs)
+        let test_vectors = create_small_scale_test_vectors();
+        for (id, name, embedding) in &test_vectors {
+            let vertex = create_vertex_with_vector(*id, name, embedding.clone());
+            graph.create_vertex(&txn, vertex)?;
+        }
+
+        let config = create_small_scale_index_config(TEST_DIMENSION);
+        graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
+
+        // Create BooleanArray filter with low selectivity (5% = ~10 out of 200) to trigger brute
+        // force Need to create bitmap that maps to actual node IDs, not array indices
+        let max_node_id = test_vectors.iter().map(|(id, _, _)| *id).max().unwrap_or(0);
+        let mut filter_bits = vec![false; (max_node_id + 1) as usize];
+
+        // Select every 20th test vector for filtering
+        let selected_test_vectors: Vec<_> = test_vectors.iter().step_by(20).collect();
+        for (node_id, _, _) in &selected_test_vectors {
+            if (*node_id as usize) < filter_bits.len() {
+                filter_bits[*node_id as usize] = true;
+            }
+        }
+        let filter_bitmap = arrow::array::BooleanArray::from(filter_bits);
+
+        // Perform post-filter search
+        let query = &test_vectors[0].2; // Use first vector as query
+        let results =
+            graph.vector_search(EMBEDDING_PROPERTY_ID, query, 5, 50, Some(&filter_bitmap))?;
+
+        // Verify results
+        assert!(!results.is_empty(), "Should find filtered results");
+        assert!(results.len() <= 5, "Results should not exceed k");
+
+        // Verify all returned IDs should be from the selected set
+        let selected_ids: Vec<u64> = selected_test_vectors.iter().map(|(id, _, _)| *id).collect();
+
+        for result_id in &results {
+            assert!(
+                selected_ids.contains(result_id),
+                "Result ID should be in filtered set"
+            );
+        }
+
+        txn.commit()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_adaptive_filter_post_filter_search() -> StorageResult<()> {
+        let (graph, _cleaner) = mock_empty_graph();
+        let txn = graph.begin_transaction(IsolationLevel::Serializable);
+
+        // Use existing test vectors
+        let test_vectors = create_small_scale_test_vectors();
+        for (id, name, embedding) in &test_vectors {
+            let vertex = create_vertex_with_vector(*id, name, embedding.clone());
+            graph.create_vertex(&txn, vertex)?;
+        }
+
+        let config = create_small_scale_index_config(TEST_DIMENSION);
+        graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
+
+        // Create BooleanArray filter with high selectivity (70% = ~140 out of 200) to trigger
+        // post-filter
+        let max_node_id = test_vectors.iter().map(|(id, _, _)| *id).max().unwrap_or(0);
+        let mut filter_bits = vec![false; (max_node_id + 1) as usize];
+
+        // Select most test vectors (exclude every 3rd to get ~67% selectivity)
+        let selected_test_vectors: Vec<_> = test_vectors
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 3 != 0) // Exclude every 3rd element
+            .map(|(_, vector_data)| vector_data)
+            .collect();
+
+        for (node_id, _, _) in &selected_test_vectors {
+            if (*node_id as usize) < filter_bits.len() {
+                filter_bits[*node_id as usize] = true;
+            }
+        }
+        let filter_bitmap = arrow::array::BooleanArray::from(filter_bits);
+
+        // Perform filtered search
+        let query = &test_vectors[50].2; // Use middle vector as query
+        let results =
+            graph.vector_search(EMBEDDING_PROPERTY_ID, query, 10, 100, Some(&filter_bitmap))?;
+
+        // Verify results
+        assert!(!results.is_empty(), "Should find filtered results");
+        assert!(results.len() <= 10, "Results should not exceed k");
+
+        // Verify all returned IDs should be from the filtered set
+        let selected_ids: Vec<u64> = selected_test_vectors.iter().map(|(id, _, _)| *id).collect();
+
+        for result_id in &results {
+            assert!(
+                selected_ids.contains(result_id),
+                "Result ID should be in filtered set"
+            );
+        }
+
+        txn.commit()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_search_edge_cases() -> StorageResult<()> {
+        let (graph, _cleaner) = mock_empty_graph();
+        let txn = graph.begin_transaction(IsolationLevel::Serializable);
+
+        // Use existing test vectors
+        let test_vectors = create_small_scale_test_vectors();
+        for (id, name, embedding) in &test_vectors {
+            let vertex = create_vertex_with_vector(*id, name, embedding.clone());
+            graph.create_vertex(&txn, vertex)?;
+        }
+
+        let config = create_small_scale_index_config(TEST_DIMENSION);
+        graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
+        let query = &test_vectors[0].2;
+
+        // Test 1: Empty filter (all false)
+        let max_node_id = test_vectors.iter().map(|(id, _, _)| *id).max().unwrap_or(0);
+        let empty_filter =
+            arrow::array::BooleanArray::from(vec![false; (max_node_id + 1) as usize]);
+        let results =
+            graph.vector_search(EMBEDDING_PROPERTY_ID, query, 5, 50, Some(&empty_filter))?;
+        assert!(
+            results.is_empty(),
+            "Empty filter should return empty results"
+        );
+
+        // Test 2: Single element filter
+        let mut single_filter_bits = vec![false; (max_node_id + 1) as usize];
+        let single_node_id = test_vectors[10].0; // Use actual node ID
+        single_filter_bits[single_node_id as usize] = true;
+        let single_filter = arrow::array::BooleanArray::from(single_filter_bits);
+        let results =
+            graph.vector_search(EMBEDDING_PROPERTY_ID, query, 5, 50, Some(&single_filter))?;
+        assert!(
+            results.len() <= 1,
+            "Single element filter should return at most 1 result"
+        );
+
+        // Test 3: Full filter (all true) - should work like no filter
+        let mut full_filter_bits = vec![false; (max_node_id + 1) as usize];
+        for (node_id, _, _) in &test_vectors {
+            full_filter_bits[*node_id as usize] = true;
+        }
+        let full_filter = arrow::array::BooleanArray::from(full_filter_bits);
+        let results_filtered =
+            graph.vector_search(EMBEDDING_PROPERTY_ID, query, 5, 50, Some(&full_filter))?;
+        let results_unfiltered = graph.vector_search(EMBEDDING_PROPERTY_ID, query, 5, 50, None)?;
+        assert_eq!(
+            results_filtered.len(),
+            results_unfiltered.len(),
+            "Full filter should match unfiltered results"
+        );
+
+        txn.commit()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_search_accuracy() -> StorageResult<()> {
+        let (graph, _cleaner) = mock_empty_graph();
+        let txn = graph.begin_transaction(IsolationLevel::Serializable);
+
+        // Use existing test vectors with known clustering
+        let test_vectors = create_small_scale_test_vectors();
+        for (id, name, embedding) in &test_vectors {
+            let vertex = create_vertex_with_vector(*id, name, embedding.clone());
+            graph.create_vertex(&txn, vertex)?;
+        }
+
+        let config = create_small_scale_index_config(TEST_DIMENSION);
+        graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
+
+        // Create a filter that selects only the first cluster (first 25 vectors)
+        let max_node_id = test_vectors.iter().map(|(id, _, _)| *id).max().unwrap_or(0);
+        let mut cluster_filter_bits = vec![false; (max_node_id + 1) as usize];
+        // test_vectors: Vec<(VertexId, String, Vec<f32>)>
+        for &(node_id, _, _) in test_vectors.iter().take(25) {
+            cluster_filter_bits[node_id as usize] = true;
+        }
+
+        let cluster_filter = arrow::array::BooleanArray::from(cluster_filter_bits);
+
+        // Search within first cluster using a query from that cluster
+        let cluster_query = &test_vectors[10].2; // 10th vector is in first cluster
+        let results = graph.vector_search(
+            EMBEDDING_PROPERTY_ID,
+            cluster_query,
+            5,
+            50,
+            Some(&cluster_filter),
+        )?;
+
+        // Verify results are within the first cluster
+        let first_cluster_ids: Vec<u64> =
+            test_vectors[0..25].iter().map(|(id, _, _)| *id).collect();
+        for result_id in &results {
+            assert!(
+                first_cluster_ids.contains(result_id),
+                "Result should be from first cluster"
+            );
+        }
+
+        // Results should be sorted by similarity (closest first)
+        assert!(!results.is_empty(), "Should find results in cluster");
+        assert!(results.len() <= 5, "Should not exceed k");
 
         txn.commit()?;
         Ok(())
