@@ -1,6 +1,6 @@
 use std::sync::{Arc, RwLock, Weak};
 
-use bitvec::prelude::*;
+use arrow::array::BooleanArray;
 use crossbeam_skiplist::SkipSet;
 use dashmap::DashMap;
 use diskann::model::IndexConfiguration;
@@ -12,11 +12,8 @@ use vector::Metric;
 
 use super::checkpoint::{CheckpointManager, CheckpointManagerConfig};
 use super::transaction::{MemTransaction, MemTxnManager, TransactionHandle, UndoEntry, UndoPtr};
-use super::vector_index::{
-    // Core vector index
-    InMemDiskANNAdapter,
-    VectorIndex,
-};
+use super::vector_index::filter::create_filter_mask;
+use super::vector_index::{InMemDiskANNAdapter, VectorIndex};
 use crate::common::model::edge::{Edge, Neighbor};
 use crate::common::model::vertex::Vertex;
 use crate::common::transaction::{DeltaOp, IsolationLevel, SetPropsOp, Timestamp};
@@ -1075,33 +1072,74 @@ impl MemoryGraph {
     /// * `query` - Query vector for similarity search
     /// * `k` - Number of nearest neighbors to return
     /// * `l_value` - Search list size parameter
-    /// * `filter` - Optional filter bitmap for restricting search results
+    /// * `filter_bitmap` - Optional boolean array indicating which nodes to consider
     pub fn vector_search(
         &self,
         property_id: PropertyId,
         query: &[f32],
         k: usize,
         l_value: u32,
-        filter: Option<&BitVec>,
+        filter_bitmap: Option<&BooleanArray>,
     ) -> StorageResult<Vec<u64>> {
-        // Get the vector index for the specified property
         let index_ref = self.get_vector_index(property_id).ok_or_else(|| {
             StorageError::VectorIndex(crate::error::VectorIndexError::IndexNotFound(
                 property_id.to_string(),
             ))
         })?;
 
-        // Directly delegate to the vector index's search method (returns node IDs)
-        let results = index_ref.search(query, k, l_value, filter)?;
+        // Convert BooleanArray to optimal FilterMask if provided
+        let filter_mask = filter_bitmap.map(|bitmap| {
+            let candidate_vector_ids = Self::bitmap_to_vector_ids(bitmap, &**index_ref);
+            create_filter_mask(candidate_vector_ids, index_ref.size())
+        });
+        let results = index_ref.search(query, k, l_value, filter_mask.as_deref())?;
 
         Ok(results)
     }
 
-    // ===== Bitmap Generation for Filtering =====
+    /// Convert a boolean bitmap to a list of vector IDs for filtering
+    ///
+    /// # Arguments
+    /// * `bitmap` - Boolean array where true indicates the node should be included
+    /// * `index` - Vector index to get node_id to vector_id mapping
+    ///
+    /// # Returns
+    /// Vector of vector IDs corresponding to nodes with true positions in the bitmap
+    fn bitmap_to_vector_ids(bitmap: &BooleanArray, index: &dyn VectorIndex) -> Vec<u32> {
+        bitmap
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, value)| {
+                if value.unwrap_or(false) {
+                    let node_id = idx as u64;
+                    index.node_to_vector_id(node_id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 
-    // === New FilterBitmap System ===
-
-    // TODO: Add new FilterBitmap v2 methods here when catalog dependency is resolved
+    /// Convert a boolean bitmap to a list of node IDs
+    ///
+    /// # Arguments
+    /// * `bitmap` - Boolean array where true indicates the node should be included
+    ///
+    /// # Returns
+    /// Vector of node IDs corresponding to true positions in the bitmap
+    fn bitmap_to_node_ids(bitmap: &BooleanArray) -> Vec<u64> {
+        bitmap
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, value)| {
+                if value.unwrap_or(false) {
+                    Some(idx as u64)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 
     /// Get mutable vector index for the specified property
     fn get_mutable_vector_index(
@@ -1226,8 +1264,6 @@ pub mod tests {
             PropertyRecord::new(properties),
         )
     }
-
-    // ===== VECTOR INDEX TEST UTILITIES =====
 
     /// Creates a test vertex with vector embedding
     fn create_vertex_with_vector(id: VertexId, name: &str, embedding: Vec<f32>) -> Vertex {

@@ -1,5 +1,4 @@
-use bitvec::prelude::*;
-
+use super::filter::FilterMask;
 use crate::error::StorageResult;
 
 /// Vector index trait for approximate nearest neighbor search
@@ -8,26 +7,19 @@ pub trait VectorIndex: Send + Sync {
     /// Configuration is provided during adapter creation
     fn build(&mut self, vectors: &[(u64, Vec<f32>)]) -> StorageResult<()>;
 
-    /// Search for k nearest neighbors using diskann-rs l_value parameter
-    /// l_value corresponds to the search list size
-    fn ann_search(
-        &self,
-        query: &[f32],
-        k: usize,
-        l_value: u32,
-        filter_bitmap: Option<&BitVec>,
-    ) -> StorageResult<Vec<u64>>;
+    /// Pure DiskANN search for k nearest neighbors without filtering
+    /// l_value corresponds to the search list size parameter
+    fn ann_search(&self, query: &[f32], k: usize, l_value: u32) -> StorageResult<Vec<u64>>;
 
-    /// Search for k nearest neighbors with bitmap filtering
-    /// filter_bitmap: None for no filtering, Some(bitmap) where bit i indicates if node i satisfies
-    /// filter
-    /// The search strategy dynamically adapts to the bitmap's selectivity
+    /// Search for k nearest neighbors with optional filtering
+    /// filter_mask: None for no filtering, Some(mask) for filtered search
+    /// Automatically selects optimal strategy based on filter characteristics
     fn search(
         &self,
         query: &[f32],
         k: usize,
         l_value: u32,
-        filter_bitmap: Option<&BitVec>,
+        filter_mask: Option<&dyn FilterMask>,
     ) -> StorageResult<Vec<u64>>;
 
     /// Insert vectors with their node IDs (for dynamic updates)
@@ -47,4 +39,7 @@ pub trait VectorIndex: Send + Sync {
 
     /// Get the number of vectors in this index
     fn size(&self) -> usize;
+
+    /// Convert node_id to vector_id, returns None if node_id not found in index
+    fn node_to_vector_id(&self, node_id: u64) -> Option<u32>;
 }
