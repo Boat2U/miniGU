@@ -1306,6 +1306,10 @@ pub mod tests {
     fn create_small_scale_test_vectors() -> Vec<(VertexId, String, Vec<f32>)> {
         let count = 200;
         let points_per_cluster = 25; // 25 points per cluster, 8 clusters
+        // Generate test vertices with unique, non-contiguous IDs (start at 5)
+        // to mimic a real subset from mixed graph + vector search.
+        let start_id: VertexId = 5;
+        let stride: VertexId = 3;
 
         (0..count)
             .map(|i| {
@@ -1336,8 +1340,8 @@ pub mod tests {
                 for (j, item) in vector.iter_mut().enumerate().skip(start).take(end - start) {
                     *item = (i as f32) * 0.1 + (j as f32) * 0.2 + 5.0;
                 }
-
-                ((i + 1) as VertexId, format!("small_scale_{}", i), vector)
+                let vid: VertexId = start_id + (i as VertexId) * stride;
+                (vid, format!("small_scale_{}", i), vector)
             })
             .collect()
     }
