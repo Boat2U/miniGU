@@ -150,4 +150,6 @@ pub enum VectorIndexError {
     NotSupported(String),
     #[error("Invalid bitmap length: expected {expected}, got {got}")]
     InvalidBitmapLength { expected: usize, got: usize },
+    #[error("Filter error: {0}")]
+    FilterError(String),
 }

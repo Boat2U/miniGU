@@ -1,6 +1,7 @@
 use std::any::Any;
 
 use bitvec::prelude::*;
+use diskann::common::FilterIndex as DiskANNFilterMask;
 
 /// Filter mask trait for vector index filtering
 /// Provides a unified interface for different filtering strategies
@@ -80,6 +81,13 @@ impl FilterMask for SparseFilterMask {
     }
 }
 
+/// Implement DiskANN FilterMask trait for SparseFilterMask
+impl DiskANNFilterMask for SparseFilterMask {
+    fn contains_vector(&self, vector_id: u32) -> bool {
+        FilterMask::contains_vector(self, vector_id)
+    }
+}
+
 /// Dense filter mask using BitVec - optimal for high selectivity
 /// Provides efficient bit-level filtering for post-filter search strategies
 #[derive(Debug, Clone)]
@@ -153,6 +161,13 @@ impl FilterMask for DenseFilterMask {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+/// Implement DiskANN FilterMask trait for DenseFilterMask  
+impl DiskANNFilterMask for DenseFilterMask {
+    fn contains_vector(&self, vector_id: u32) -> bool {
+        FilterMask::contains_vector(self, vector_id)
     }
 }
 

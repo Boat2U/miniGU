@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use dashmap::DashMap;
-use diskann::common::AlignedBoxWithSlice;
+use diskann::common::{AlignedBoxWithSlice, FilterIndex as DiskANNFilterMask};
 use diskann::index::{ANNInmemIndex, create_inmem_index};
 use diskann::model::IndexConfiguration;
 use diskann::model::vertex::{DIM_104, DIM_128, DIM_256};
@@ -11,7 +11,7 @@ use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use vector::distance_l2_vector_f32;
 
-use super::filter::FilterMask;
+use super::filter::{DenseFilterMask, FilterMask};
 use super::index::VectorIndex;
 use crate::error::{StorageError, StorageResult, VectorIndexError};
 
@@ -219,9 +219,7 @@ impl InMemDiskANNAdapter {
         if expanded_k == 0 {
             return Ok(Vec::new());
         }
-
-        // Perform regular DiskANN search with expanded k
-        let all_results = self.ann_search(query, expanded_k, l_value)?;
+        let all_results = self.ann_search(query, expanded_k, l_value, None)?;
 
         // Filter results using the filter mask's contains_vector method
         // Convert node_id to vector_id for filtering
@@ -244,6 +242,31 @@ impl InMemDiskANNAdapter {
         }
 
         Ok(filtered)
+    }
+
+    /// Pre-filter search: DiskANN search with FilterMask filtering
+    /// Used for larger candidate sets where diskann index search is more efficient
+    fn pre_filter_search(
+        &self,
+        query: &[f32],
+        k: usize,
+        l_value: u32,
+        filter_mask: &dyn FilterMask,
+    ) -> StorageResult<Vec<u64>> {
+        // Convert miniGU FilterMask to DiskANN FilterMask for pre-filtering
+        let diskann_filter = {
+            if let Some(dense) = filter_mask.as_any().downcast_ref::<DenseFilterMask>() {
+                dense as &dyn DiskANNFilterMask
+            } else {
+                return Err(StorageError::VectorIndex(VectorIndexError::FilterError(
+                    "Unsupported FilterMask type".to_string(),
+                )));
+            }
+        };
+        // Perform DiskANN search with pre-filter bitmap
+        let filtered_results = self.ann_search(query, k, l_value, Some(diskann_filter))?;
+
+        Ok(filtered_results)
     }
 
     /// Compute L2 squared distance between query vector and stored vector
@@ -361,7 +384,13 @@ impl VectorIndex for InMemDiskANNAdapter {
         }
     }
 
-    fn ann_search(&self, query: &[f32], k: usize, l_value: u32) -> StorageResult<Vec<u64>> {
+    fn ann_search(
+        &self,
+        query: &[f32],
+        k: usize,
+        l_value: u32,
+        filter_mask: Option<&dyn DiskANNFilterMask>,
+    ) -> StorageResult<Vec<u64>> {
         // Check if index is built
         if self.vector_to_node.is_empty() {
             return Err(StorageError::VectorIndex(VectorIndexError::IndexNotBuilt));
@@ -374,9 +403,10 @@ impl VectorIndex for InMemDiskANNAdapter {
         }
 
         let mut vector_ids = vec![0u32; effective_k];
+
         let actual_count = self
             .inner
-            .search(query, effective_k, l_value, &mut vector_ids)
+            .search(query, effective_k, l_value, &mut vector_ids, filter_mask)
             .map_err(|e| StorageError::VectorIndex(VectorIndexError::SearchError(e.to_string())))?;
 
         // Filter deleted vectors and convert to node_ids
@@ -415,7 +445,7 @@ impl VectorIndex for InMemDiskANNAdapter {
     ) -> StorageResult<Vec<u64>> {
         // No filter provided, use regular DiskANN search
         let Some(mask) = filter_mask else {
-            return self.ann_search(query, k, l_value);
+            return self.ann_search(query, k, l_value, None);
         };
 
         // Check if index is built
@@ -433,8 +463,9 @@ impl VectorIndex for InMemDiskANNAdapter {
         // Adaptive strategy selection based on selectivity
         if selectivity < 0.1 {
             self.brute_force_search(query, k, mask)
+        } else if selectivity < 0.5 {
+            self.pre_filter_search(query, k, l_value, mask)
         } else {
-            // For larger candidate sets, use DiskANN with post-filtering
             self.post_filter_search(query, k, l_value, mask)
         }
     }
