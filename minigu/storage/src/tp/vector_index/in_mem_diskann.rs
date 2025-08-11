@@ -286,7 +286,6 @@ impl InMemDiskANNAdapter {
             DIM_104 => simd_distance!(DIM_104),
             DIM_128 => simd_distance!(DIM_128),
             DIM_256 => simd_distance!(DIM_256),
-            // _ => Self::compute_scalar_l2_squared(query, stored),
             _ => unreachable!(),
         };
 
