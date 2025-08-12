@@ -17,6 +17,7 @@ pub trait VectorIndex: Send + Sync {
         k: usize,
         l_value: u32,
         filter_mask: Option<&dyn DiskANNFilterMask>,
+        should_pre: bool,
     ) -> StorageResult<Vec<u64>>;
 
     /// Search for k nearest neighbors with optional filtering
@@ -28,6 +29,7 @@ pub trait VectorIndex: Send + Sync {
         k: usize,
         l_value: u32,
         filter_mask: Option<&dyn FilterMask>,
+        should_pre: bool,
     ) -> StorageResult<Vec<u64>>;
 
     /// Insert vectors with their node IDs (for dynamic updates)

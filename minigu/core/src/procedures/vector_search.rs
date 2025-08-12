@@ -31,7 +31,7 @@ pub fn build_procedure() -> Procedure {
     )]));
 
     Procedure::new(parameters, Some(schema), |context, args| {
-        assert_eq!(args.len(), 5);
+        assert_eq!(args.len(), 6);
 
         let property_name = args[0]
             .try_as_string()
@@ -52,6 +52,10 @@ pub fn build_procedure() -> Procedure {
             .expect("l_value must be a uint32")
             .expect("l_value cannot be null");
         let filter_condition = args[4].try_as_string().and_then(|s| s.clone());
+        let should_pre = args[5]
+            .try_as_boolean()
+            .expect("should_pre must be a boolean")
+            .expect("should_pre cannot be null");
 
         if k == 0 || l_value == 0 {
             return Err(anyhow::anyhow!("k and l_value must be positive").into());
@@ -91,6 +95,7 @@ pub fn build_procedure() -> Procedure {
                 k as usize,
                 l_value,
                 filter_bitmap.as_ref(),
+                should_pre,
             )
             .map_err(|e| anyhow::anyhow!("Vector search failed: {}", e))?;
 

@@ -1079,6 +1079,7 @@ impl MemoryGraph {
         k: usize,
         l_value: u32,
         filter_bitmap: Option<&BooleanArray>,
+        should_pre: bool,
     ) -> StorageResult<Vec<u64>> {
         let index_ref = self.get_vector_index(property_id).ok_or_else(|| {
             StorageError::VectorIndex(VectorIndexError::IndexNotFound(property_id.to_string()))
@@ -1089,7 +1090,7 @@ impl MemoryGraph {
             let candidate_vector_ids = Self::bitmap_to_vector_ids(bitmap, &**index_ref);
             create_filter_mask(candidate_vector_ids, index_ref.size())
         });
-        let results = index_ref.search(query, k, l_value, filter_mask.as_deref())?;
+        let results = index_ref.search(query, k, l_value, filter_mask.as_deref(), should_pre)?;
 
         Ok(results)
     }
@@ -1253,7 +1254,7 @@ pub mod tests {
     }
 
     /// Creates optimized test index configuration for small-scale datasets (200+ points)
-    fn create_small_scale_index_config(dimension: usize) -> IndexConfiguration {
+    fn create_test_index_config(dimension: usize) -> IndexConfiguration {
         let write_params = IndexWriteParametersBuilder::new(100, 64) // Larger search list and degree
             .with_alpha(1.0) // Lower alpha to avoid over-pruning
             .with_num_threads(1) // Single thread for deterministic results
@@ -2155,8 +2156,6 @@ pub mod tests {
         );
     }
 
-    // ===== VECTOR INDEX TESTS =====
-
     #[test]
     fn test_vector_index_build_and_verify() -> StorageResult<()> {
         let (graph, _cleaner) = mock_empty_graph();
@@ -2170,7 +2169,7 @@ pub mod tests {
         }
 
         // Build vector index with small-scale configuration
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         // Verify index creation and properties
@@ -2197,7 +2196,7 @@ pub mod tests {
         }
 
         // Build index with small-scale configuration
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         // Test 1: Search in cluster 1 area (coordinates around 30-42)
@@ -2205,7 +2204,8 @@ pub mod tests {
         cluster1_query[0] = 35.0f32;
         cluster1_query[1] = 30.0f32;
         cluster1_query[2] = 25.0f32;
-        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &cluster1_query, 10, 50, None)?;
+        let results =
+            graph.vector_search(EMBEDDING_PROPERTY_ID, &cluster1_query, 10, 50, None, false)?;
         assert!(!results.is_empty(), "Should find vectors in cluster 1");
         assert!(results.len() <= 10, "Results should not exceed k");
 
@@ -2214,7 +2214,8 @@ pub mod tests {
         cluster2_query[0] = 55.0f32;
         cluster2_query[1] = 45.0f32;
         cluster2_query[2] = 37.0f32;
-        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &cluster2_query, 5, 30, None)?;
+        let results =
+            graph.vector_search(EMBEDDING_PROPERTY_ID, &cluster2_query, 5, 30, None, false)?;
         assert!(!results.is_empty(), "Should find vectors in cluster 2");
         assert!(results.len() <= 5, "Results should not exceed k");
 
@@ -2229,7 +2230,7 @@ pub mod tests {
 
         // Try to search without building index
         let query = vec![1.0f32; TEST_DIMENSION];
-        let result = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 1, 20, None);
+        let result = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 1, 20, None, false);
 
         // Should fail with IndexNotFound error
         assert!(result.is_err());
@@ -2244,7 +2245,7 @@ pub mod tests {
         let txn = graph.begin_transaction(IsolationLevel::Serializable);
 
         // Try to build index on empty dataset
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         let result = graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config);
 
         // Should fail with appropriate error
@@ -2266,12 +2267,13 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         // Try to search with wrong dimension query
         let wrong_dim_query = vec![0.0f32; 50]; // Wrong dimension
-        let result = graph.vector_search(EMBEDDING_PROPERTY_ID, &wrong_dim_query, 1, 50, None);
+        let result =
+            graph.vector_search(EMBEDDING_PROPERTY_ID, &wrong_dim_query, 1, 50, None, false);
 
         // Should fail due to dimension mismatch
         assert!(result.is_err());
@@ -2299,12 +2301,13 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         // Search should return correct vertex IDs for modified vectors
         for (expected_id, _, embedding) in test_vectors.iter().take(5) {
-            let results = graph.vector_search(EMBEDDING_PROPERTY_ID, embedding, 1, 50, None)?;
+            let results =
+                graph.vector_search(EMBEDDING_PROPERTY_ID, embedding, 1, 50, None, false)?;
             assert_eq!(results.len(), 1);
             assert_eq!(
                 results[0], *expected_id,
@@ -2330,7 +2333,7 @@ pub mod tests {
         }
 
         // Building index should succeed with small-scale connected data
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         let result = graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config);
         assert!(
             result.is_ok(),
@@ -2343,7 +2346,7 @@ pub mod tests {
         query[0] = 98.0f32; // Query near the boundary vertex coordinates
         query[1] = 83.0f32;
         query[2] = 66.0f32;
-        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 5, 50, None)?;
+        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 5, 50, None, false)?;
 
         assert!(!results.is_empty(), "Should find nearby vectors");
         assert!(
@@ -2369,7 +2372,7 @@ pub mod tests {
         }
 
         // Build index with small-scale configuration
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         // Verify index properties
@@ -2381,7 +2384,7 @@ pub mod tests {
         query[0] = 75.0f32; // Search in middle area
         query[1] = 60.0f32;
         query[2] = 45.0f32;
-        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 15, 50, None)?;
+        let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 15, 50, None, false)?;
         assert!(!results.is_empty());
         assert!(results.len() <= 15);
 
@@ -2401,7 +2404,7 @@ pub mod tests {
             graph.create_vertex(&txn1, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn1, EMBEDDING_PROPERTY_ID, config)?;
         txn1.commit()?;
 
@@ -2412,7 +2415,7 @@ pub mod tests {
             query[0] = 65.0f32; // Search in cluster area
             query[1] = 55.0f32;
             query[2] = 40.0f32;
-            let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 5, 30, None)?;
+            let results = graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 5, 30, None, false)?;
             assert!(!results.is_empty());
             txn2.commit()?;
         }
@@ -2447,7 +2450,7 @@ pub mod tests {
         }
 
         // Build indices on different properties
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, 1, config.clone())?; // Property 1
         graph.build_vector_index(&txn, 2, config)?; // Property 2
 
@@ -2456,8 +2459,8 @@ pub mod tests {
         query[0] = 80.0f32; // Query in large coordinate space
         query[1] = 70.0f32;
         query[2] = 50.0f32;
-        let results_1 = graph.vector_search(1, &query, 3, 30, None)?;
-        let results_2 = graph.vector_search(2, &query, 3, 30, None)?;
+        let results_1 = graph.vector_search(1, &query, 3, 30, None, false)?;
+        let results_2 = graph.vector_search(2, &query, 3, 30, None, false)?;
 
         assert!(!results_1.is_empty());
         assert!(!results_2.is_empty());
@@ -2503,7 +2506,7 @@ pub mod tests {
         target_vector: &[f32],
         expected_node_id: VertexId,
     ) -> StorageResult<bool> {
-        let results = graph.vector_search(property_id, target_vector, 5, 50, None)?;
+        let results = graph.vector_search(property_id, target_vector, 5, 50, None, false)?;
         Ok(results.contains(&expected_node_id))
     }
 
@@ -2514,7 +2517,7 @@ pub mod tests {
         query_vector: &[f32],
         excluded_node_id: VertexId,
     ) -> StorageResult<bool> {
-        let results = graph.vector_search(property_id, query_vector, 20, 100, None)?; // Use larger k to be thorough
+        let results = graph.vector_search(property_id, query_vector, 20, 100, None, false)?; // Use larger k to be thorough
         Ok(!results.contains(&excluded_node_id))
     }
 
@@ -2530,7 +2533,7 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         // Verify initial index size
@@ -2583,7 +2586,7 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         let initial_size = graph
@@ -2638,7 +2641,7 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         let initial_size = graph
@@ -2691,7 +2694,7 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         let initial_size = graph
@@ -2744,7 +2747,7 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         let initial_size = graph
@@ -2803,7 +2806,7 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         let initial_size = graph
@@ -2855,7 +2858,7 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         // Try to delete non-existent node ID
@@ -2881,7 +2884,7 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         let initial_size = graph
@@ -2960,7 +2963,7 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         // Mixed operations: insert, search, delete, search again
@@ -2975,7 +2978,7 @@ pub mod tests {
 
         // 2. Search for inserted vector
         let search_results =
-            graph.vector_search(EMBEDDING_PROPERTY_ID, new_embedding, 5, 50, None)?;
+            graph.vector_search(EMBEDDING_PROPERTY_ID, new_embedding, 5, 50, None, false)?;
         assert!(search_results.contains(new_id));
 
         // 3. Delete the inserted vector
@@ -3015,7 +3018,7 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         // Create BooleanArray filter with low selectivity (5% = ~10 out of 200) to trigger brute
@@ -3034,12 +3037,18 @@ pub mod tests {
 
         // Perform brute force search
         let query = &test_vectors[0].2; // Use first vector as query
-        let results =
-            graph.vector_search(EMBEDDING_PROPERTY_ID, query, 5, 50, Some(&filter_bitmap))?;
+        let results = graph.vector_search(
+            EMBEDDING_PROPERTY_ID,
+            query,
+            5,
+            50,
+            Some(&filter_bitmap),
+            false,
+        )?;
 
         // Verify results
         assert!(!results.is_empty(), "Should find filtered results");
-        assert!(results.len() <= 5, "Results should not exceed k");
+        assert!(results.len() == 5, "Results should be k");
 
         // Verify all returned IDs should be from the selected set
         let selected_ids: Vec<u64> = selected_test_vectors.iter().map(|(id, _, _)| *id).collect();
@@ -3067,7 +3076,7 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         // Create BooleanArray filter with high selectivity (50% = ~100 out of 200) to trigger
@@ -3079,7 +3088,7 @@ pub mod tests {
         let selected_test_vectors: Vec<_> = test_vectors
             .iter()
             .enumerate()
-            .filter(|(i, _)| i % 2 != 0) // Exclude every 3rd element
+            .filter(|(i, _)| i % 2 != 0) // Exclude every 2nd element
             .map(|(_, vector_data)| vector_data)
             .collect();
 
@@ -3091,9 +3100,15 @@ pub mod tests {
         let filter_bitmap = arrow::array::BooleanArray::from(filter_bits);
 
         // Perform filtered search
-        let query = &test_vectors[50].2; // Use middle vector as query
-        let results =
-            graph.vector_search(EMBEDDING_PROPERTY_ID, query, 10, 100, Some(&filter_bitmap))?;
+        let query = &test_vectors[49].2; // Use middle vector as query
+        let results = graph.vector_search(
+            EMBEDDING_PROPERTY_ID,
+            query,
+            10,
+            100,
+            Some(&filter_bitmap),
+            false,
+        )?;
 
         // Verify results
         assert!(!results.is_empty(), "Should find filtered results");
@@ -3108,6 +3123,20 @@ pub mod tests {
                 "Result ID should be in filtered set"
             );
         }
+
+        // pre-filter search should return the same result as query when k is one
+        let result_k1 = graph.vector_search(
+            EMBEDDING_PROPERTY_ID,
+            query,
+            1,
+            100,
+            Some(&filter_bitmap),
+            true,
+        )?;
+        assert_eq!(
+            result_k1[0], test_vectors[49].0,
+            "result_k1 vid should be same as query vid"
+        );
 
         txn.commit()?;
         Ok(())
@@ -3125,19 +3154,19 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
-        // Create BooleanArray filter with high selectivity (33% = ~67 out of 200) to trigger
+        // Create BooleanArray filter with high selectivity (50% = 100 out of 200) to trigger
         // pre-filter
         let max_node_id = test_vectors.iter().map(|(id, _, _)| *id).max().unwrap_or(0);
         let mut filter_bits = vec![false; (max_node_id + 1) as usize];
 
-        // Select most test vectors (exclude every 3rd to get ~33% selectivity)
+        // Select most test vectors (exclude every 2rd to get 50% selectivity)
         let selected_test_vectors: Vec<_> = test_vectors
             .iter()
             .enumerate()
-            .filter(|(i, _)| i % 3 != 0) // Exclude every 3rd element
+            .filter(|(i, _)| i % 2 != 0) // Exclude every 2nd element
             .map(|(_, vector_data)| vector_data)
             .collect();
 
@@ -3149,13 +3178,19 @@ pub mod tests {
         let filter_bitmap = arrow::array::BooleanArray::from(filter_bits);
 
         // Perform filtered search
-        let query = &test_vectors[40].2; // Use middle vector as query
-        let results =
-            graph.vector_search(EMBEDDING_PROPERTY_ID, query, 10, 100, Some(&filter_bitmap))?;
+        let query = &test_vectors[49].2; // Use middle vector as query
+        let results = graph.vector_search(
+            EMBEDDING_PROPERTY_ID,
+            query,
+            5,
+            100,
+            Some(&filter_bitmap),
+            true,
+        )?;
 
         // Verify results
         assert!(!results.is_empty(), "Should find filtered results");
-        assert!(results.len() == 10, "Results should be k");
+        assert!(results.len() == 5, "Results should be k");
 
         // Verify all returned IDs should be from the filtered set
         let selected_ids: Vec<u64> = selected_test_vectors.iter().map(|(id, _, _)| *id).collect();
@@ -3166,6 +3201,20 @@ pub mod tests {
                 "Result ID should be in filtered set"
             );
         }
+
+        // pre-filter search should return the same result as query when k is one
+        let result_k1 = graph.vector_search(
+            EMBEDDING_PROPERTY_ID,
+            query,
+            1,
+            100,
+            Some(&filter_bitmap),
+            true,
+        )?;
+        assert_eq!(
+            result_k1[0], test_vectors[49].0,
+            "result_k1 vid should be same as query vid"
+        );
 
         txn.commit()?;
         Ok(())
@@ -3183,7 +3232,7 @@ pub mod tests {
             graph.create_vertex(&txn, vertex)?;
         }
 
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
         let query = &test_vectors[0].2;
 
@@ -3191,8 +3240,14 @@ pub mod tests {
         let max_node_id = test_vectors.iter().map(|(id, _, _)| *id).max().unwrap_or(0);
         let empty_filter =
             arrow::array::BooleanArray::from(vec![false; (max_node_id + 1) as usize]);
-        let results =
-            graph.vector_search(EMBEDDING_PROPERTY_ID, query, 5, 50, Some(&empty_filter))?;
+        let results = graph.vector_search(
+            EMBEDDING_PROPERTY_ID,
+            query,
+            5,
+            50,
+            Some(&empty_filter),
+            false,
+        )?;
         assert!(
             results.is_empty(),
             "Empty filter should return empty results"
@@ -3203,8 +3258,14 @@ pub mod tests {
         let single_node_id = test_vectors[10].0; // Use actual node ID
         single_filter_bits[single_node_id as usize] = true;
         let single_filter = arrow::array::BooleanArray::from(single_filter_bits);
-        let results =
-            graph.vector_search(EMBEDDING_PROPERTY_ID, query, 5, 50, Some(&single_filter))?;
+        let results = graph.vector_search(
+            EMBEDDING_PROPERTY_ID,
+            query,
+            5,
+            50,
+            Some(&single_filter),
+            false,
+        )?;
         assert!(
             results.len() <= 1,
             "Single element filter should return at most 1 result"
@@ -3216,9 +3277,16 @@ pub mod tests {
             full_filter_bits[*node_id as usize] = true;
         }
         let full_filter = arrow::array::BooleanArray::from(full_filter_bits);
-        let results_filtered =
-            graph.vector_search(EMBEDDING_PROPERTY_ID, query, 5, 50, Some(&full_filter))?;
-        let results_unfiltered = graph.vector_search(EMBEDDING_PROPERTY_ID, query, 5, 50, None)?;
+        let results_filtered = graph.vector_search(
+            EMBEDDING_PROPERTY_ID,
+            query,
+            5,
+            50,
+            Some(&full_filter),
+            true,
+        )?; // pre-filter
+        let results_unfiltered =
+            graph.vector_search(EMBEDDING_PROPERTY_ID, query, 5, 50, None, false)?;
         assert_eq!(
             results_filtered.len(),
             results_unfiltered.len(),
@@ -3230,7 +3298,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_filter_search_accuracy() -> StorageResult<()> {
+    fn test_pre_filter_search_in_cluster() -> StorageResult<()> {
         let (graph, _cleaner) = mock_empty_graph();
         let txn = graph.begin_transaction(IsolationLevel::Serializable);
 
@@ -3240,7 +3308,7 @@ pub mod tests {
             let vertex = create_vertex_with_vector(*id, name, embedding.clone());
             graph.create_vertex(&txn, vertex)?;
         }
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         // Create a filter that selects only the first cluster (first 25 vectors, pre-filter search)
@@ -3252,7 +3320,7 @@ pub mod tests {
         }
         let cluster_filter = arrow::array::BooleanArray::from(cluster_filter_bits);
 
-        // Search within first cluster using a query from that cluster
+        // Pre-filter Search within first cluster using a query from that cluster
         let cluster_query = &test_vectors[10].2; // 10th vector is in first cluster
         let results = graph.vector_search(
             EMBEDDING_PROPERTY_ID,
@@ -3260,6 +3328,7 @@ pub mod tests {
             5,
             50,
             Some(&cluster_filter),
+            true,
         )?;
 
         // Verify results are within the first cluster
@@ -3275,6 +3344,20 @@ pub mod tests {
         // Results should be sorted by similarity (closest first)
         assert!(!results.is_empty(), "Should find results in cluster");
         assert!(results.len() == 5, "Should be k");
+
+        // pre-filter search should return the same result as query when k is one
+        let result_k1 = graph.vector_search(
+            EMBEDDING_PROPERTY_ID,
+            cluster_query,
+            1,
+            50,
+            Some(&cluster_filter),
+            true,
+        )?;
+        assert_eq!(
+            result_k1[0], test_vectors[10].0,
+            "result_k1 vid should be same as query vid"
+        );
 
         txn.commit()?;
         Ok(())
@@ -3306,10 +3389,10 @@ pub mod tests {
         let mut vec4 = vec![0.0f32; TEST_DIMENSION];
         vec4[1] = 1.0; // 1² + 1² + 0² + ... = 2.0
         vectors.push((104u64, "far".to_string(), vec4));
-        // Vector 5: Very far - distance² = 3.0
+        // Vector 5: Very far
         let mut vec5 = vec![0.0f32; TEST_DIMENSION];
-        vec5[0] = -1.0; // (1.0 - (-1.0))² = 4.0, but let's make it sqrt(3)
-        vec5[1] = 1.0; // (1.0)² + (1.0)² + (1.0)² = 3.0
+        vec5[0] = -1.0;
+        vec5[1] = 1.0;
         vec5[2] = 1.0;
         vectors.push((105u64, "very_far".to_string(), vec5));
 
@@ -3327,7 +3410,7 @@ pub mod tests {
             let vertex = create_vertex_with_vector(*id, name, embedding.clone());
             graph.create_vertex(&txn, vertex)?;
         }
-        let config = create_small_scale_index_config(TEST_DIMENSION);
+        let config = create_test_index_config(TEST_DIMENSION);
         graph.build_vector_index(&txn, EMBEDDING_PROPERTY_ID, config)?;
 
         // Query vector: [1.0, 0.0, 0.0, ...]
@@ -3341,7 +3424,7 @@ pub mod tests {
         filter_bits[104] = true; // far
         let filter = arrow::array::BooleanArray::from(filter_bits);
         let filtered_results =
-            graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 2, 50, Some(&filter))?;
+            graph.vector_search(EMBEDDING_PROPERTY_ID, &query, 2, 50, Some(&filter), false)?;
         assert_eq!(
             filtered_results.len(),
             2,

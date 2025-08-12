@@ -198,60 +198,15 @@ impl InMemDiskANNAdapter {
         Ok(node_ids)
     }
 
-    /// Post-filter search: DiskANN search followed by FilterMask filtering
+    /// filter search: DiskANN search with FilterMask filtering
     /// Used for larger candidate sets where diskann index search is more efficient
-    fn post_filter_search(
+    fn filter_search(
         &self,
         query: &[f32],
         k: usize,
         l_value: u32,
         filter_mask: &dyn FilterMask,
-    ) -> StorageResult<Vec<u64>> {
-        let total_nodes = self.size();
-        let selectivity = filter_mask.selectivity();
-
-        // Adaptive expansion: use logarithmic scaling for smooth expansion
-        let expansion_factor = {
-            let log_factor = 2.0 * (-selectivity.ln()).max(1.0);
-            (log_factor.ceil() as usize).clamp(2, 50)
-        };
-        let expanded_k = std::cmp::min(k * expansion_factor, total_nodes);
-        if expanded_k == 0 {
-            return Ok(Vec::new());
-        }
-        let all_results = self.ann_search(query, expanded_k, l_value, None)?;
-
-        // Filter results using the filter mask's contains_vector method
-        // Convert node_id to vector_id for filtering
-        let filtered: Vec<u64> = all_results
-            .into_iter()
-            .filter(|&node_id| {
-                if let Some(vector_id) = self.node_to_vector.get(&node_id) {
-                    filter_mask.contains_vector(*vector_id)
-                } else {
-                    false
-                }
-            })
-            .take(k)
-            .collect();
-
-        // Update statistics
-        if let Ok(mut stats) = self.stats.write() {
-            stats.post_filter_searches += 1;
-            stats.update_expansion_factor(expansion_factor);
-        }
-
-        Ok(filtered)
-    }
-
-    /// Pre-filter search: DiskANN search with FilterMask filtering
-    /// Used for larger candidate sets where diskann index search is more efficient
-    fn pre_filter_search(
-        &self,
-        query: &[f32],
-        k: usize,
-        l_value: u32,
-        filter_mask: &dyn FilterMask,
+        should_pre: bool,
     ) -> StorageResult<Vec<u64>> {
         // Convert miniGU FilterMask to DiskANN FilterMask for pre-filtering
         let diskann_filter = {
@@ -263,8 +218,8 @@ impl InMemDiskANNAdapter {
                 )));
             }
         };
-        // Perform DiskANN search with pre-filter bitmap
-        let filtered_results = self.ann_search(query, k, l_value, Some(diskann_filter))?;
+        let filtered_results =
+            self.ann_search(query, k, l_value, Some(diskann_filter), should_pre)?;
 
         Ok(filtered_results)
     }
@@ -390,6 +345,7 @@ impl VectorIndex for InMemDiskANNAdapter {
         k: usize,
         l_value: u32,
         filter_mask: Option<&dyn DiskANNFilterMask>,
+        should_pre: bool,
     ) -> StorageResult<Vec<u64>> {
         // Check if index is built
         if self.vector_to_node.is_empty() {
@@ -401,25 +357,25 @@ impl VectorIndex for InMemDiskANNAdapter {
         if effective_k == 0 {
             return Ok(Vec::new()); // No active vectors
         }
-
         let mut vector_ids = vec![0u32; effective_k];
-
         let actual_count = self
             .inner
-            .search(query, effective_k, l_value, &mut vector_ids, filter_mask)
+            .search(
+                query,
+                effective_k,
+                l_value,
+                &mut vector_ids,
+                filter_mask,
+                should_pre,
+            )
             .map_err(|e| StorageError::VectorIndex(VectorIndexError::SearchError(e.to_string())))?;
-
-        // Filter deleted vectors and convert to node_ids
         let mut node_ids = Vec::with_capacity(actual_count as usize);
-
         for &vector_id in vector_ids.iter().take(actual_count as usize) {
             if let Some(entry) = self.vector_to_node.get(&vector_id) {
                 let node_id = *entry;
                 // DiskANN-rs already filters deleted vectors in its search method
-                // No need for additional filtering here
                 node_ids.push(node_id);
             } else {
-                // This should not happen if our mapping is consistent
                 return Err(StorageError::VectorIndex(
                     VectorIndexError::VectorIdNotFound { vector_id },
                 ));
@@ -442,31 +398,27 @@ impl VectorIndex for InMemDiskANNAdapter {
         k: usize,
         l_value: u32,
         filter_mask: Option<&dyn FilterMask>,
+        should_pre: bool,
     ) -> StorageResult<Vec<u64>> {
-        // No filter provided, use regular DiskANN search
+        // No filter provided, DiskANN search without filter
         let Some(mask) = filter_mask else {
-            return self.ann_search(query, k, l_value, None);
+            return self.ann_search(query, k, l_value, None, false);
         };
 
         // Check if index is built
         if self.vector_to_node.is_empty() {
             return Err(StorageError::VectorIndex(VectorIndexError::IndexNotBuilt));
         }
-
         // If no valid candidates, return empty
         if mask.candidate_count() == 0 {
             return Ok(Vec::new());
         }
 
         let selectivity = mask.selectivity();
-
-        // Adaptive strategy selection based on selectivity
         if selectivity < 0.1 {
             self.brute_force_search(query, k, mask)
-        } else if selectivity < 0.5 {
-            self.pre_filter_search(query, k, l_value, mask)
         } else {
-            self.post_filter_search(query, k, l_value, mask)
+            self.filter_search(query, k, l_value, mask, should_pre)
         }
     }
 
