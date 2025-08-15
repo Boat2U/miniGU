@@ -2,7 +2,6 @@ mod create_test_graph;
 mod echo;
 mod export_import;
 mod show_procedures;
-mod vector_search;
 
 use minigu_context::procedure::Procedure;
 
@@ -24,10 +23,6 @@ pub fn build_predefined_procedures() -> Vec<(String, Procedure)> {
         (
             "export".to_string(),
             export_import::export::build_procedure(),
-        ),
-        (
-            "vector_search".to_string(),
-            vector_search::build_procedure(),
         ),
     ]
 }

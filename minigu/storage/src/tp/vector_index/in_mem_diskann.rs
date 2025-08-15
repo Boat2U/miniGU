@@ -1,6 +1,5 @@
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Instant;
 
 use dashmap::DashMap;
 use diskann::common::{AlignedBoxWithSlice, FilterIndex as DiskANNFilterMask};
@@ -8,7 +7,6 @@ use diskann::index::{ANNInmemIndex, create_inmem_index};
 use diskann::model::IndexConfiguration;
 use diskann::model::vertex::{DIM_104, DIM_128, DIM_256};
 use ordered_float::OrderedFloat;
-use serde::{Deserialize, Serialize};
 use vector::distance_l2_vector_f32;
 
 use super::filter::{DenseFilterMask, FilterMask};
@@ -30,56 +28,6 @@ impl AlignedQueryBuffer<'_> {
     }
 }
 
-/// Index statistics and performance metrics
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct IndexStats {
-    pub vector_count: usize,
-    pub memory_usage: usize,
-    pub build_time_ms: Option<u64>,
-    pub avg_search_time_us: Option<f64>,
-    pub search_count: u64,
-    pub brute_force_searches: u64,
-    pub post_filter_searches: u64,
-    pub pre_filter_searches: u64,
-    pub total_brute_force_candidates: u64,
-    pub expansion_factor_sum: f64,
-    pub expansion_factor_count: u64,
-    pub avg_expansion_factor: f64,
-    pub max_expansion_factor: usize,
-    pub min_expansion_factor: usize,
-}
-
-impl IndexStats {
-    pub fn new() -> Self {
-        Self {
-            min_expansion_factor: usize::MAX, // Initialize to max for proper min tracking
-            ..Default::default()
-        }
-    }
-
-    pub fn update_expansion_factor(&mut self, factor: usize) {
-        self.expansion_factor_sum += factor as f64;
-        self.expansion_factor_count += 1;
-        self.avg_expansion_factor = self.expansion_factor_sum / self.expansion_factor_count as f64;
-        self.max_expansion_factor = self.max_expansion_factor.max(factor);
-        if self.min_expansion_factor == usize::MAX {
-            self.min_expansion_factor = factor;
-        } else {
-            self.min_expansion_factor = self.min_expansion_factor.min(factor);
-        }
-    }
-
-    pub fn update_after_build(
-        &mut self,
-        vector_count: usize,
-        build_time_ms: u64,
-        memory_usage: usize,
-    ) {
-        self.vector_count = vector_count;
-        self.build_time_ms = Some(build_time_ms);
-        self.memory_usage = memory_usage;
-    }
-}
 
 #[allow(clippy::upper_case_acronyms)]
 pub struct InMemDiskANNAdapter {
@@ -89,7 +37,6 @@ pub struct InMemDiskANNAdapter {
     node_to_vector: DashMap<u64, u32>,
     vector_to_node: DashMap<u32, u64>,
     next_vector_id: AtomicU32, // Next vector ID to be allocated
-    stats: std::sync::RwLock<IndexStats>,
 }
 
 impl InMemDiskANNAdapter {
@@ -104,16 +51,9 @@ impl InMemDiskANNAdapter {
             node_to_vector: DashMap::new(),
             vector_to_node: DashMap::new(),
             next_vector_id: AtomicU32::new(0),
-            stats: std::sync::RwLock::new(IndexStats::new()),
         })
     }
 
-    pub fn stats(&self) -> IndexStats {
-        self.stats
-            .read()
-            .expect("RwLock poisoned while reading index stats")
-            .clone()
-    }
 
     pub fn mapping_count(&self) -> usize {
         self.node_to_vector.len()
@@ -124,9 +64,6 @@ impl InMemDiskANNAdapter {
         self.node_to_vector.clear();
         self.vector_to_node.clear();
         self.next_vector_id.store(0, Ordering::Relaxed);
-        *self.stats.write().expect(
-            "Failed to acquire write lock on stats in clear_mappings (lock may be poisoned)",
-        ) = IndexStats::new();
     }
 
     /// Create aligned query vector for optimal SIMD performance
@@ -159,7 +96,6 @@ impl InMemDiskANNAdapter {
         let aligned_query = Self::ensure_query_aligned(query)?;
 
         let mut heap = BinaryHeap::<(OrderedFloat<f32>, u32)>::with_capacity(k);
-        let mut valid_candidates = 0;
 
         for vector_id in filter_mask.iter_candidates() {
             // TODO: Filter out deleted vectors
@@ -170,7 +106,6 @@ impl InMemDiskANNAdapter {
                 .get_aligned_vector_data(vector_id)
                 .map_err(|e| StorageError::VectorIndex(VectorIndexError::DiskANN(e)))?;
             let distance = Self::compute_l2_distance(aligned_query.as_slice(), stored_vector)?;
-            valid_candidates += 1;
 
             if heap.len() < k {
                 heap.push((OrderedFloat(distance), vector_id));
@@ -190,10 +125,6 @@ impl InMemDiskANNAdapter {
             })
             .collect();
 
-        if let Ok(mut stats) = self.stats.write() {
-            stats.brute_force_searches += 1;
-            stats.total_brute_force_candidates += valid_candidates;
-        }
 
         Ok(node_ids)
     }
@@ -273,7 +204,6 @@ impl InMemDiskANNAdapter {
 
 impl VectorIndex for InMemDiskANNAdapter {
     fn build(&mut self, vectors: &[(u64, Vec<f32>)]) -> StorageResult<()> {
-        let start = Instant::now();
 
         if vectors.is_empty() {
             return Err(StorageError::VectorIndex(VectorIndexError::EmptyDataset));
@@ -322,11 +252,6 @@ impl VectorIndex for InMemDiskANNAdapter {
                 self.next_vector_id
                     .store(sorted_vectors.len() as u32, Ordering::Relaxed);
 
-                let build_time = start.elapsed().as_millis() as u64;
-                {
-                    let mut stats = self.stats.write().expect("Failed to acquire write lock on stats (lock poisoned) while updating build stats");
-                    stats.update_after_build(sorted_vectors.len(), build_time, 0);
-                }
 
                 Ok(())
             }
@@ -382,12 +307,6 @@ impl VectorIndex for InMemDiskANNAdapter {
             }
         }
 
-        {
-            let mut stats = self.stats.write().expect(
-                "Failed to acquire write lock on stats (lock poisoned) while updating search stats",
-            );
-            stats.search_count += 1;
-        }
 
         Ok(node_ids)
     }
