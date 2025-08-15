@@ -96,8 +96,6 @@ impl InMemDiskANNAdapter {
         let mut heap = BinaryHeap::<(OrderedFloat<f32>, u32)>::with_capacity(k);
 
         for vector_id in filter_mask.iter_candidates() {
-            // TODO: Filter out deleted vectors
-
             // Get 64-byte aligned vector data from DiskANN (zero-copy access)
             let stored_vector = self
                 .inner
@@ -173,7 +171,6 @@ impl InMemDiskANNAdapter {
                 // Check 64-byte alignment (Vector crate requirement)
                 if query.as_ptr().align_offset(64) != 0 {
                     panic!("query must be 64-byte aligned");
-                    // return Ok(Self::compute_scalar_l2_squared(query, stored));
                 }
                 if stored.as_ptr().align_offset(64) != 0 {
                     panic!("vectors must be 64-byte aligned");
@@ -225,7 +222,6 @@ impl VectorIndex for InMemDiskANNAdapter {
                 ));
             }
 
-            // Check for duplicate node IDs
             if !seen_nodes.insert(*node_id) {
                 self.clear_mappings();
                 return Err(StorageError::VectorIndex(
@@ -235,14 +231,12 @@ impl VectorIndex for InMemDiskANNAdapter {
 
             // Establish ID mapping - DiskANN will assign vector_id = array_index
             let vector_id = array_index as u32;
-
             self.node_to_vector.insert(*node_id, vector_id);
             self.vector_to_node.insert(vector_id, *node_id);
 
             vector_data.push(vector.as_slice());
         }
 
-        // Call DiskANN to build the index
         match self.inner.build_from_memory(&vector_data) {
             Ok(()) => {
                 self.next_vector_id
@@ -318,11 +312,9 @@ impl VectorIndex for InMemDiskANNAdapter {
             return self.ann_search(query, k, l_value, None, false);
         };
 
-        // Check if index is built
         if self.vector_to_node.is_empty() {
             return Err(StorageError::VectorIndex(VectorIndexError::IndexNotBuilt));
         }
-        // If no valid candidates, return empty
         if mask.candidate_count() == 0 {
             return Ok(Vec::new());
         }
@@ -397,7 +389,6 @@ impl VectorIndex for InMemDiskANNAdapter {
             .map(|(_, vector)| vector.as_slice())
             .collect();
 
-        // Call DiskANN insert
         match self.inner.insert_from_memory(&vector_data) {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -445,7 +436,6 @@ impl VectorIndex for InMemDiskANNAdapter {
             }
         }
 
-        // Call DiskANN soft deletion
         match self
             .inner
             .soft_delete(vector_ids_to_delete.clone(), vector_ids_to_delete.len())

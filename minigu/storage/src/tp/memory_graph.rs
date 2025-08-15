@@ -940,9 +940,7 @@ impl MemoryGraph {
         Ok(())
     }
 
-    // ===== Vector Index Methods =====
-
-    /// Collect vectors from graph nodes for the specified property (private helper method)
+    /// Collect vectors from graph nodes for the specified property
     fn collect_vectors_for_property(
         &self,
         txn: &TransactionHandle,
@@ -1016,10 +1014,7 @@ impl MemoryGraph {
             }
         }
 
-        // Create DiskANN adapter using provided configuration
         let mut adapter = InMemDiskANNAdapter::new(index_config)?;
-
-        // Build the index
         adapter.build(&vectors)?;
 
         // Store the index in the hash map (using PropertyId as key)
@@ -1072,6 +1067,7 @@ impl MemoryGraph {
     /// * `k` - Number of nearest neighbors to return
     /// * `l_value` - Search list size parameter
     /// * `filter_bitmap` - Optional boolean array indicating which nodes to consider
+    /// * `should_pre` - should pre-filter
     pub fn vector_search(
         &self,
         property_id: PropertyId,
@@ -1136,12 +1132,10 @@ impl MemoryGraph {
             return Ok(());
         }
 
-        // Get mutable reference to the vector index
         let mut index_ref = self.get_mutable_vector_index(property_id).ok_or_else(|| {
             StorageError::VectorIndex(VectorIndexError::IndexNotFound(property_id.to_string()))
         })?;
 
-        // Perform the insertion
         index_ref.insert(vectors)?;
 
         Ok(())
@@ -1157,12 +1151,10 @@ impl MemoryGraph {
             return Ok(());
         }
 
-        // Get mutable reference to the vector index
         let mut index_ref = self.get_mutable_vector_index(property_id).ok_or_else(|| {
             StorageError::VectorIndex(VectorIndexError::IndexNotFound(property_id.to_string()))
         })?;
 
-        // Perform the soft deletion
         index_ref.soft_delete(node_ids)?;
 
         Ok(())
@@ -2468,8 +2460,6 @@ pub mod tests {
         txn.commit()?;
         Ok(())
     }
-
-    // ===== VECTOR INDEX INSERT/DELETE TESTS =====
 
     /// Creates additional test vectors for insert operations
     fn create_additional_test_vectors(
