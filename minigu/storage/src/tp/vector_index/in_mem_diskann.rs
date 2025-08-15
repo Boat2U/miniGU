@@ -28,7 +28,6 @@ impl AlignedQueryBuffer<'_> {
     }
 }
 
-
 #[allow(clippy::upper_case_acronyms)]
 pub struct InMemDiskANNAdapter {
     inner: Box<dyn ANNInmemIndex<f32> + 'static>,
@@ -53,7 +52,6 @@ impl InMemDiskANNAdapter {
             next_vector_id: AtomicU32::new(0),
         })
     }
-
 
     pub fn mapping_count(&self) -> usize {
         self.node_to_vector.len()
@@ -124,7 +122,6 @@ impl InMemDiskANNAdapter {
                 self.vector_to_node.get(&vector_id).map(|node_id| *node_id)
             })
             .collect();
-
 
         Ok(node_ids)
     }
@@ -204,7 +201,6 @@ impl InMemDiskANNAdapter {
 
 impl VectorIndex for InMemDiskANNAdapter {
     fn build(&mut self, vectors: &[(u64, Vec<f32>)]) -> StorageResult<()> {
-
         if vectors.is_empty() {
             return Err(StorageError::VectorIndex(VectorIndexError::EmptyDataset));
         }
@@ -251,7 +247,6 @@ impl VectorIndex for InMemDiskANNAdapter {
             Ok(()) => {
                 self.next_vector_id
                     .store(sorted_vectors.len() as u32, Ordering::Relaxed);
-
 
                 Ok(())
             }
@@ -306,7 +301,6 @@ impl VectorIndex for InMemDiskANNAdapter {
                 ));
             }
         }
-
 
         Ok(node_ids)
     }
