@@ -725,7 +725,7 @@ dependencies = [
  "rand 0.9.2",
  "rayon",
  "thiserror",
- "vector",
+ "vector 0.1.0 (git+https://github.com/Boat2U/DiskANN-rs.git?rev=0428a89844d7c9c441bad8bae1eaf64fa5d21540)",
 ]
 
 [[package]]
@@ -1535,8 +1535,10 @@ dependencies = [
  "minigu-common",
  "minigu-context",
  "minigu-planner",
+ "minigu-storage",
  "rayon",
  "thiserror",
+ "vector 0.1.0 (git+https://github.com/Boat2U/DiskANN-rs.git?rev=5cac50510d49782d774a55e45ec21211bce69174)",
 ]
 
 [[package]]
@@ -1576,7 +1578,7 @@ dependencies = [
  "temp-file",
  "thiserror",
  "uuid",
- "vector",
+ "vector 0.1.0 (git+https://github.com/Boat2U/DiskANN-rs.git?rev=0428a89844d7c9c441bad8bae1eaf64fa5d21540)",
 ]
 
 [[package]]
@@ -2485,6 +2487,17 @@ dependencies = [
 name = "vector"
 version = "0.1.0"
 source = "git+https://github.com/Boat2U/DiskANN-rs.git?rev=0428a89844d7c9c441bad8bae1eaf64fa5d21540#0428a89844d7c9c441bad8bae1eaf64fa5d21540"
+dependencies = [
+ "bytemuck",
+ "cc",
+ "half",
+ "thiserror",
+]
+
+[[package]]
+name = "vector"
+version = "0.1.0"
+source = "git+https://github.com/Boat2U/DiskANN-rs.git?rev=5cac50510d49782d774a55e45ec21211bce69174#5cac50510d49782d774a55e45ec21211bce69174"
 dependencies = [
  "bytemuck",
  "cc",

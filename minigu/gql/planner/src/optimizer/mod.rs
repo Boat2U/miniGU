@@ -1,12 +1,15 @@
 use std::sync::Arc;
 
 use itertools::Itertools;
+use minigu_common::types::{VectorIndexKey, VectorMetric};
 
+use crate::bound::BoundExpr;
 use crate::error::PlanResult;
 use crate::plan::filter::Filter;
 use crate::plan::limit::Limit;
 use crate::plan::project::Project;
 use crate::plan::sort::Sort;
+use crate::plan::vector_search::VectorSearch;
 use crate::plan::{PlanData, PlanNode};
 
 #[derive(Debug, Default)]
@@ -64,9 +67,53 @@ fn create_physical_plan_impl(logical_plan: &PlanNode) -> PlanResult<PlanNode> {
             let [child] = children
                 .try_into()
                 .expect("limit should have exactly one child");
-            let limit = Limit::new(child, limit.limit);
+            if limit.approximate {
+                if let Some(vector_search) = try_optimize_vector_search(&child, limit) {
+                    return Ok(PlanNode::PhysicalVectorSearch(Arc::new(vector_search)));
+                }
+            }
+            let limit = Limit::new(child, limit.limit, limit.approximate);
             Ok(PlanNode::PhysicalLimit(Arc::new(limit)))
         }
         _ => unreachable!(),
     }
+}
+
+/// Attempts to optimize a vector search query pattern:
+/// LogicalSort(VECTOR_DISTANCE) + LogicalLimit(approximate=true)
+fn try_optimize_vector_search(child: &PlanNode, limit: &Limit) -> Option<VectorSearch> {
+    if let PlanNode::PhysicalSort(sort) = child {
+        for sort_spec in &sort.specs {
+            if let Some((query_vector_expr, target_vector, metric)) =
+                extract_vector_distance_args(&sort_spec.key)
+            {
+                if let Some(index_key) = extract_index_key_from_target(&target_vector) {
+                    if let Some(schema) = child.schema().cloned() {
+                        return VectorSearch::new(
+                            schema,
+                            index_key,
+                            query_vector_expr,
+                            limit.limit, /* return k results directly. TODO: Iterative
+                                          * post-filtering */
+                            metric,
+                        )
+                        .ok();
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extracts VectorIndexKey from target vector expression
+/// TODO: Implement proper index key extraction based on expression analysis
+fn extract_index_key_from_target(_target_expr: &BoundExpr) -> Option<VectorIndexKey> {
+    todo!()
+}
+
+/// Extracts arguments from VECTOR_DISTANCE function call
+/// Returns: (query_vector_expr, target_vector_expr, metric)
+fn extract_vector_distance_args(_expr: &BoundExpr) -> Option<(BoundExpr, BoundExpr, VectorMetric)> {
+    todo!()
 }

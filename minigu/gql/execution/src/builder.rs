@@ -12,6 +12,7 @@ use crate::evaluator::column_ref::ColumnRef;
 use crate::evaluator::constant::Constant;
 use crate::executor::procedure_call::ProcedureCallBuilder;
 use crate::executor::sort::SortSpec;
+use crate::executor::vector_search::VectorSearchBuilder;
 use crate::executor::{BoxedExecutor, Executor, IntoExecutor};
 
 const DEFAULT_CHUNK_SIZE: usize = 2048;
@@ -91,6 +92,25 @@ impl ExecutorBuilder {
             PlanNode::PhysicalLimit(limit) => {
                 assert_eq!(children.len(), 1);
                 Box::new(self.build_executor(&children[0]).limit(limit.limit))
+            }
+            PlanNode::PhysicalVectorSearch(vector_search) => {
+                assert!(children.is_empty());
+                let schema_ref = vector_search
+                    .schema()
+                    .expect("vector_search should have a schema");
+                let query_evaluator =
+                    self.build_evaluator(&vector_search.query_vector_expr, schema_ref);
+                Box::new(
+                    VectorSearchBuilder::new(
+                        self.session.clone(),
+                        vector_search.index_key,
+                        query_evaluator,
+                        vector_search.k,
+                        vector_search.metric,
+                        schema_ref.clone(),
+                    )
+                    .into_executor(),
+                )
             }
             _ => unreachable!(),
         }
