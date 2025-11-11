@@ -4,6 +4,7 @@ pub mod limit;
 pub mod logical_match;
 pub mod one_row;
 pub mod project;
+pub mod scan;
 pub mod sort;
 pub mod vector_index_scan;
 
@@ -18,6 +19,7 @@ use crate::plan::limit::Limit;
 use crate::plan::logical_match::LogicalMatch;
 use crate::plan::one_row::OneRow;
 use crate::plan::project::Project;
+use crate::plan::scan::PhysicalNodeScan;
 use crate::plan::sort::Sort;
 use crate::plan::vector_index_scan::VectorIndexScan;
 
@@ -73,6 +75,13 @@ pub enum PlanNode {
     PhysicalOneRow(Arc<OneRow>),
     PhysicalSort(Arc<Sort>),
     PhysicalLimit(Arc<Limit>),
+    //  PhysicalNodeScan retrieves node ids based on labels during the scan phase,
+    //  without immediately materializing full node attributes.
+    //  During subsequent matching and computation, these ids are lazily expanded
+    //  into complete attribute representations (ArrayRefs) only when required,
+    //  to improve performance and reduce unnecessary data loading.
+    PhysicalNodeScan(Arc<PhysicalNodeScan>),
+    // PhysicalCatalogModify(Arc<PhysicalCatalogModify>)
     PhysicalVectorIndexScan(Arc<VectorIndexScan>),
 }
 
@@ -86,6 +95,7 @@ impl PlanData for PlanNode {
             PlanNode::LogicalOneRow(node) => node.base(),
             PlanNode::LogicalSort(node) => node.base(),
             PlanNode::LogicalLimit(node) => node.base(),
+            PlanNode::LogicalVectorIndexScan(node) => node.base(),
 
             PlanNode::PhysicalFilter(node) => node.base(),
             PlanNode::PhysicalProject(node) => node.base(),
@@ -93,7 +103,7 @@ impl PlanData for PlanNode {
             PlanNode::PhysicalOneRow(node) => node.base(),
             PlanNode::PhysicalSort(node) => node.base(),
             PlanNode::PhysicalLimit(node) => node.base(),
-            PlanNode::LogicalVectorIndexScan(node) => node.base(),
+            PlanNode::PhysicalNodeScan(node) => node.base(),
             PlanNode::PhysicalVectorIndexScan(node) => node.base(),
         }
     }
